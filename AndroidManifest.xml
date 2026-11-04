@@ -2,8 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.taskfilter">
 
-    <!-- Only used by the settings screen to list installed apps. -->
+    <!-- Only used by the settings screen to list installed apps. HyperOS/MIUI additionally gates the
+         list behind its own runtime permission; the screen requests it on first launch. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="com.android.permission.GET_INSTALLED_APPS" />
 
     <application
         android:allowBackup="false"

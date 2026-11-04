@@ -36,6 +36,9 @@
 1. 从 [Releases](../../releases) 下载 APK 并安装。
 2. LSPosed 管理器 → 模块 → 启用 **Task Filter**，作用域勾选 **小米服务框架**。如果开了应用双开（用户 999），列表里两个小米服务框架都要勾。
 3. 打开 Task Filter，勾选要隐藏的应用，约 3 秒后自动生效。
+   - HyperOS/MIUI 会先弹出「读取应用列表」权限，请允许，否则只能看到系统应用。
+   - 如果在 KernelSU/Magisk 里给 Task Filter 授予 root，它还会用 `pm list packages` 补全被其他隐藏模块挡住的应用。
+   - 列表里找不到的应用，可以在搜索框输入完整包名，点「＋ 手动添加」。
 4. 重启手机，或在 root shell 里执行 `am force-stop com.xiaomi.xmsf`，让小米服务框架以加载了模块的状态重新启动。
 
 **不要勾选依赖小米推送的应用**（微信、QQ、钉钉、企业微信等），否则它们的通知可能收不到。
