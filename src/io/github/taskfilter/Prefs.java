@@ -13,6 +13,10 @@ final class Prefs {
     static final String KEY_ENABLED = "enabled";
     /** Write the "[task-filter] ..." counters to the LSPosed log (which also reaches logcat). */
     static final String KEY_VERBOSE = "verbose";
+    /** Hide newly installed apps that match the automatic rules as soon as they are installed. */
+    static final String KEY_AUTO_NEW = "auto_new";
+    /** ... including apps the rules cannot place either way. */
+    static final String KEY_AUTO_UNKNOWN = "auto_unknown";
 
     /**
      * The list handed to the hooks. The settings screen writes it with root into the target's own
@@ -21,6 +25,8 @@ final class Prefs {
      * depend on LSPosed's deprecated XSharedPreferences.
      */
     static final String CONFIG_NAME = ".task-filter";
+    /** Next to it: apps the hook hid at install time, merged into the selection by the settings screen. */
+    static final String CONFIG_AUTO_NAME = ".task-filter-auto";
 
     static final Pattern PACKAGE = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+");
 

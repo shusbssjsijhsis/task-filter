@@ -1,9 +1,11 @@
 package io.github.taskfilter;
 
 import android.app.ActivityManager;
+import android.app.AppComponentFactory;
 import android.app.usage.UsageEvents;
 import android.app.usage.UsageStats;
 import android.app.usage.UsageStatsManager;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -15,6 +17,8 @@ import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.content.pm.ResolveInfo;
 import android.content.pm.VersionedPackage;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Parcel;
 import android.os.SystemClock;
 
@@ -84,6 +88,7 @@ final class Filters {
         hookTaskStackListener(cl, ok);
         hookPackageManager(cl, ok);
         hookLauncherApps(ok);
+        hookPackageEvents(cl, ok);
         if (Config.verbose()) {
             XposedBridge.log(T + "loaded in " + process + " (user " + Config.userId() + "): " + ok);
         }
@@ -91,6 +96,7 @@ final class Filters {
 
     static void onConfigChanged() {
         idsStale = true;
+        AUTO_DECIDED.clear();
     }
 
     private static void add(List<String> ok, String name, Set<XC_MethodHook.Unhook> hooks) {
@@ -659,6 +665,149 @@ final class Filters {
     }
 
     // ------------------------------------------------------------------------------------------
+    // Package broadcasts. xmsf's eventtracking.PackageMonitor records every install and uninstall
+    // (package name from the broadcast, plus the installer). Events about a hidden package never reach
+    // a receiver in the target, and an app installed later that matches the automatic rules is hidden
+    // before the first receiver sees its install event.
+
+    private static final Set<String> PACKAGE_ACTIONS = new HashSet<>(Arrays.asList(
+            Intent.ACTION_PACKAGE_ADDED, Intent.ACTION_PACKAGE_REMOVED, Intent.ACTION_PACKAGE_FULLY_REMOVED,
+            Intent.ACTION_PACKAGE_REPLACED, Intent.ACTION_PACKAGE_CHANGED, Intent.ACTION_PACKAGE_DATA_CLEARED,
+            Intent.ACTION_PACKAGE_RESTARTED, Intent.ACTION_PACKAGE_FIRST_LAUNCH,
+            Intent.ACTION_PACKAGE_NEEDS_VERIFICATION, Intent.ACTION_PACKAGE_VERIFIED,
+            "android.intent.action.PACKAGE_INSTALL", "android.intent.action.PACKAGE_UNSTOPPED",
+            "android.intent.action.PACKAGE_ENABLE_ROLLBACK", "android.intent.action.QUERY_PACKAGE_RESTART"));
+    private static final Set<String> PACKAGE_LIST_ACTIONS = new HashSet<>(Arrays.asList(
+            Intent.ACTION_PACKAGES_SUSPENDED, Intent.ACTION_PACKAGES_UNSUSPENDED,
+            Intent.ACTION_EXTERNAL_APPLICATIONS_AVAILABLE, Intent.ACTION_EXTERNAL_APPLICATIONS_UNAVAILABLE,
+            "android.intent.action.DISTRACTING_PACKAGES_CHANGED",
+            "android.intent.action.PACKAGES_SUSPENSION_CHANGED"));
+    private static final String EXTRA_PACKAGES = "android.intent.extra.PACKAGES";
+
+    private static final Set<Class<?>> RECEIVER_CLASSES =
+            Collections.newSetFromMap(new ConcurrentHashMap<Class<?>, Boolean>());
+    private static final Set<Method> RECEIVER_METHODS = Collections.newSetFromMap(new ConcurrentHashMap<Method, Boolean>());
+    /** Install-time decisions, so the several receivers of one broadcast classify the app only once. */
+    private static final Map<String, Boolean> AUTO_DECIDED = new ConcurrentHashMap<>();
+    private static volatile XC_MethodHook receiverGate;
+
+    private static void hookPackageEvents(ClassLoader cl, List<String> ok) {
+        receiverGate = before("packageEvents", Filters::gatePackageEvent);
+        // Every receiver instance - declared in the manifest or registered at run time - gets its
+        // onReceive gated. The empty BroadcastReceiver constructor can be inlined into compiled
+        // callers, so receivers are also caught where the framework creates or registers them.
+        add(ok, "BroadcastReceiver", XposedBridge.hookAllConstructors(BroadcastReceiver.class,
+                after("receivers", p -> watchReceiver(p.thisObject))));
+        if (Build.VERSION.SDK_INT >= 28) {
+            add(ok, "instantiateReceiver", XposedBridge.hookAllMethods(AppComponentFactory.class,
+                    "instantiateReceiver", after("receivers", p -> watchReceiver(p.getResult()))));
+        }
+        Class<?> dispatcher = XposedHelpers.findClassIfExists("android.app.LoadedApk$ReceiverDispatcher", cl);
+        if (dispatcher != null) {
+            add(ok, "ReceiverDispatcher", XposedBridge.hookAllConstructors(dispatcher, after("receivers", p -> {
+                for (Object a : p.args) if (a instanceof BroadcastReceiver) watchReceiver(a);
+            })));
+        }
+    }
+
+    private static void watchReceiver(Object receiver) {
+        if (!(receiver instanceof BroadcastReceiver) || receiverGate == null) return;
+        Class<?> c = receiver.getClass();
+        if (!RECEIVER_CLASSES.add(c)) return;
+        for (Class<?> k = c; k != null && k != BroadcastReceiver.class; k = k.getSuperclass()) {
+            Method m;
+            try {
+                m = k.getDeclaredMethod("onReceive", Context.class, Intent.class);
+            } catch (NoSuchMethodException e) {
+                continue;
+            } catch (Throwable t) {
+                logOnce("receivers", t);
+                return;
+            }
+            if (!Modifier.isAbstract(m.getModifiers()) && RECEIVER_METHODS.add(m)) {
+                try {
+                    XposedBridge.hookMethod(m, receiverGate);
+                } catch (Throwable t) {
+                    logOnce("receivers", t);
+                }
+            }
+            return;
+        }
+    }
+
+    /** Before onReceive(Context, Intent): drop or trim package events that mention a hidden app. */
+    private static void gatePackageEvent(XC_MethodHook.MethodHookParam p) {
+        if (p.args.length < 2 || !(p.args[1] instanceof Intent)) return;
+        Intent intent = (Intent) p.args[1];
+        String action = intent.getAction();
+        if (action == null) return;
+        if (PACKAGE_ACTIONS.contains(action)) {
+            String pkg = packageOf(intent, action);
+            if (pkg == null) return;
+            if (Config.hidden().contains(pkg)) {
+                p.setResult(null);
+                count("packageEvents", 1);
+            } else if (Intent.ACTION_PACKAGE_ADDED.equals(action)
+                    && !intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)
+                    && autoHide(p.args[0] instanceof Context ? (Context) p.args[0] : null, pkg)) {
+                p.setResult(null);
+                count("autoHidden", 1);
+            }
+            return;
+        }
+        if (!PACKAGE_LIST_ACTIONS.contains(action)) return;
+        Set<String> h = Config.hidden();
+        if (h.isEmpty()) return;
+        String[] pkgs = intent.getStringArrayExtra(Intent.EXTRA_CHANGED_PACKAGE_LIST);
+        if (pkgs == null) return;
+        int[] uids = intent.getIntArrayExtra(Intent.EXTRA_CHANGED_UID_LIST);
+        List<String> keep = new ArrayList<>();
+        List<Integer> keepUids = new ArrayList<>();
+        for (int i = 0; i < pkgs.length; i++) {
+            if (pkgs[i] != null && h.contains(pkgs[i])) continue;
+            keep.add(pkgs[i]);
+            if (uids != null && i < uids.length) keepUids.add(uids[i]);
+        }
+        if (keep.size() == pkgs.length) return;
+        count("packageEvents", 1);
+        if (keep.isEmpty()) {
+            p.setResult(null);
+            return;
+        }
+        Intent copy = new Intent(intent);
+        copy.putExtra(Intent.EXTRA_CHANGED_PACKAGE_LIST, keep.toArray(new String[0]));
+        if (uids != null) {
+            int[] u = new int[keepUids.size()];
+            for (int i = 0; i < u.length; i++) u[i] = keepUids.get(i);
+            copy.putExtra(Intent.EXTRA_CHANGED_UID_LIST, u);
+        }
+        p.args[1] = copy;
+    }
+
+    private static String packageOf(Intent intent, String action) {
+        Uri data = intent.getData();
+        if (data != null && "package".equals(data.getScheme())) return data.getSchemeSpecificPart();
+        if ("android.intent.action.QUERY_PACKAGE_RESTART".equals(action)) {
+            String[] list = intent.getStringArrayExtra(EXTRA_PACKAGES);
+            if (list != null && list.length == 1) return list[0];
+        }
+        return null;
+    }
+
+    /** A new install: hide it now if it matches the automatic rules (decided once per package). */
+    private static boolean autoHide(Context ctx, String pkg) {
+        if (!Config.autoNew()) return false;
+        Boolean decided = AUTO_DECIDED.get(pkg);
+        if (decided != null) return decided;
+        if (ctx == null) ctx = currentApplication();
+        if (ctx == null) return false;
+        boolean hide = AutoSelect.shouldHideNewApp(ctx, pkg, Config.autoUnknown());
+        if (hide) Config.addAuto(pkg); // clears AUTO_DECIDED through onConfigChanged, so record afterwards
+        AUTO_DECIDED.put(pkg, hide);
+        return hide;
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Helpers
 
     /** Replaces a List result with a copy that has the hidden entries removed. */
@@ -723,6 +872,10 @@ final class Filters {
         }
         hiddenAppIds = ids;
         if (Config.hidden() == config) idsStale = false;
+    }
+
+    static Context application() {
+        return currentApplication();
     }
 
     private static Context currentApplication() {
