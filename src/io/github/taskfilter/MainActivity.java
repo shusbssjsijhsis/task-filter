@@ -81,6 +81,7 @@ public class MainActivity extends Activity {
     private EditText search;
     private CheckBox showSystem;
     private CheckBox enabled;
+    private CheckBox verbose;
     private TextView summary;
     private TextView source;
     private volatile boolean loading;
@@ -118,7 +119,9 @@ public class MainActivity extends Activity {
                 ? "⚠ 本模块尚未在 LSPosed 中启用，设置不会生效。请在 LSPosed 管理器里启用 Task Filter，"
                 + "作用域勾选「小米服务框架」，然后重新打开本页面。"
                 : "勾选的应用会对「小米服务框架」隐藏：最近任务、前台应用变化、运行中的进程、使用记录和已安装应用列表。"
-                + "修改约 3 秒后生效。不要勾选依赖小米推送的应用（微信、QQ、钉钉、企业微信等）。");
+                + "修改约 3 秒后生效。不要勾选依赖小米推送的应用（微信、QQ、钉钉、企业微信等）。\n"
+                + "用了应用双开时，双开空间里还有一个小米服务框架：先用 root 执行 "
+                + "pm install-existing --user 999 " + Prefs.MODULE + "，再在 LSPosed 的 999 用户页启用本模块并勾选小米服务框架。");
         root.addView(info);
 
         enabled = new CheckBox(this);
@@ -127,6 +130,13 @@ public class MainActivity extends Activity {
         enabled.setEnabled(prefs != null);
         enabled.setOnCheckedChangeListener((b, checked) -> save());
         root.addView(enabled);
+
+        verbose = new CheckBox(this);
+        verbose.setText("记录日志（只记过滤次数；确认生效后可关闭，减少痕迹）");
+        verbose.setChecked(prefs == null || prefs.getBoolean(Prefs.KEY_VERBOSE, true));
+        verbose.setEnabled(prefs != null);
+        verbose.setOnCheckedChangeListener((b, checked) -> save());
+        root.addView(verbose);
 
         showSystem = new CheckBox(this);
         showSystem.setText("显示系统应用");
@@ -376,6 +386,7 @@ public class MainActivity extends Activity {
         prefs.edit()
                 .putStringSet(Prefs.KEY_HIDDEN, new HashSet<>(hidden))
                 .putBoolean(Prefs.KEY_ENABLED, enabled.isChecked())
+                .putBoolean(Prefs.KEY_VERBOSE, verbose.isChecked())
                 .apply();
         updateSummary();
     }

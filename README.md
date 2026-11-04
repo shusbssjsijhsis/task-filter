@@ -41,11 +41,27 @@
    - 列表里找不到的应用，可以在搜索框输入完整包名，点「＋ 手动添加」。
 4. 重启手机，或在 root shell 里执行 `am force-stop com.xiaomi.xmsf`，让小米服务框架以加载了模块的状态重新启动。
 
+### 应用双开（用户 999）
+
+双开空间里运行着另一个小米服务框架，它同样会收到主空间的前台应用变化。LSPosed 要求模块安装在目标应用所在的用户里，所以还需要：
+
+1. root shell 执行 `pm install-existing --user 999 io.github.taskfilter`；
+2. LSPosed 管理器 → 模块 → 切到 999 用户的标签页 → 启用 Task Filter，作用域勾选小米服务框架；
+3. 重启手机。
+
+双开空间不用单独设置：那里的模块会读取主空间的勾选列表。
+
 **不要勾选依赖小米推送的应用**（微信、QQ、钉钉、企业微信等），否则它们的通知可能收不到。
 
 ## 验证
 
-- LSPosed 日志里应该有一行 `[task-filter] loaded in com.xiaomi.xmsf: [...]`，方括号里是生效的钩子；之后的 `filtered so far: ...` 是累计过滤次数。模块的日志只记次数，从不记应用名。
+- LSPosed 日志里应该有 `[task-filter] loaded in com.xiaomi.xmsf (user 0): [...]`（双开空间是 `user 999`），方括号里是生效的钩子；`config (user N): ... settings found / from user 0` 表示读到了勾选列表；`filtered so far ...` 是累计过滤次数。模块的日志只记次数，从不记应用名：
+
+  ```
+  su -c "grep -h 'task-filter' /data/adb/lspd/log/modules*.log | tail -n 30"
+  ```
+
+- 设置页的「记录日志」可以关掉：LSPosed 的模块日志也会进 logcat，确认生效后关闭可以少留痕迹。
 - 小米服务框架自己的日志（logcat 标签 `MyLog`）里，`CollectRunningTasks ... report tasks is:` 和 `onPackageGoForeground()` 不应再出现被隐藏的应用：
 
   ```

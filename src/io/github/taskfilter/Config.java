@@ -1,5 +1,6 @@
 package io.github.taskfilter;
 
+import android.os.Process;
 import android.os.SystemClock;
 
 import java.io.File;
@@ -18,10 +19,13 @@ import de.robv.android.xposed.XposedBridge;
  */
 final class Config {
     private static final long CHECK_INTERVAL_MS = 3000;
+    private static final int PER_USER_RANGE = 100000;
     private static final Object LOCK = new Object();
 
     private static XSharedPreferences prefs;
+    private static String source = "none";
     private static volatile Set<String> hidden = Collections.emptySet();
+    private static volatile boolean verbose = true;
     private static volatile long lastCheck = Long.MIN_VALUE / 2;
 
     private Config() {}
@@ -40,6 +44,16 @@ final class Config {
         return hidden;
     }
 
+    /** Whether the module may write its counters to the log. */
+    static boolean verbose() {
+        hidden();
+        return verbose;
+    }
+
+    static int userId() {
+        return Process.myUid() / PER_USER_RANGE;
+    }
+
     private static void reload() {
         try {
             boolean fresh = false;
@@ -56,26 +70,54 @@ final class Config {
                 // Whenever something is hidden, the filter itself is hidden as well.
                 if (!next.isEmpty()) next.add(Prefs.MODULE);
             }
+            boolean wasVerbose = verbose;
+            verbose = prefs.getBoolean(Prefs.KEY_VERBOSE, true);
             Set<String> previous = hidden;
             hidden = Collections.unmodifiableSet(next);
-            if (!previous.equals(next)) {
+            if (!previous.equals(next) || wasVerbose != verbose) {
                 Filters.onConfigChanged();
-                XposedBridge.log("[task-filter] config: " + Math.max(0, next.size() - 1) + " app(s) hidden"
-                        + (prefs.getFile().canRead() ? "" : " (settings not readable yet)"));
+                if (verbose) {
+                    XposedBridge.log("[task-filter] config (user " + userId() + "): "
+                            + Math.max(0, next.size() - 1) + " app(s) hidden, settings " + source);
+                }
             }
         } catch (Throwable t) {
             Filters.logOnce("config", t);
         }
     }
 
+    /**
+     * LSPosed keeps module settings per user. A secondary user such as the dual-app space (999)
+     * normally has no settings of its own because the settings screen only runs for the owner, so
+     * fall back to the owner's copy.
+     */
     private static XSharedPreferences open() {
         XSharedPreferences p = new XSharedPreferences(Prefs.MODULE, Prefs.FILE);
         File f = p.getFile();
-        if (f == null || f.canRead()) return p;
-        // A secondary user (e.g. the dual-app space) has no settings of its own: use the owner's.
-        String path = f.getPath();
-        String owner = path.replaceFirst("/prefs\\d+/", "/prefs/");
-        if (!owner.equals(path) && new File(owner).canRead()) return new XSharedPreferences(new File(owner));
+        if (f == null) {
+            source = "unavailable";
+            return p;
+        }
+        if (f.canRead()) {
+            source = "found";
+            return p;
+        }
+        int user = userId();
+        if (user != 0) {
+            String path = f.getPath();
+            String[] candidates = {
+                    path.replaceFirst("/prefs" + user + "/", "/prefs/"),
+                    path.replaceFirst("/" + user + "/", "/0/"),
+            };
+            for (String candidate : candidates) {
+                if (!candidate.equals(path) && new File(candidate).canRead()) {
+                    source = "from user 0";
+                    return new XSharedPreferences(new File(candidate));
+                }
+            }
+        }
+        // Report the layout without LSPosed's randomised base directory.
+        source = "not readable (" + f.getPath().replaceFirst("^/data/misc/[^/]+/", "<lspd>/") + ")";
         return p;
     }
 }
