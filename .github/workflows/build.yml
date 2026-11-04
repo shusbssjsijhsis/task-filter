@@ -1,0 +1,108 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # publish the APK as a release
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Locate Android SDK
+        run: |
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          plat=$(ls -d "$ANDROID_HOME"/platforms/android-* | sort -V | tail -n1)
+          echo "BUILD_TOOLS=$bt" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$plat/android.jar" >> "$GITHUB_ENV"
+          echo "build-tools: $bt"
+          echo "platform:    $plat"
+
+      - name: Fetch Xposed API (compile-only)
+        run: |
+          jar="$RUNNER_TEMP/xposed-api-82.jar"
+          curl -fsSL -o "$jar" https://api.xposed.info/de/robv/android/xposed/api/82/api-82.jar
+          sha256sum "$jar"
+          echo "XPOSED_API_JAR=$jar" >> "$GITHUB_ENV"
+
+      # Signing: a SIGNING_KEY_B64 (base64 PKCS12) + SIGNING_KEY_PASS secret pins the key forever.
+      # Without it, a key is generated once and reused from the Actions cache, so updates install in
+      # place as long as the cache entry lives (it is evicted after 7 days without a build).
+      - name: Restore cached signing key
+        id: key
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/signing/key.p12
+          key: task-filter-signing-v1
+
+      - name: Prepare signing key
+        env:
+          SIGNING_KEY_B64: ${{ secrets.SIGNING_KEY_B64 }}
+          SIGNING_KEY_PASS: ${{ secrets.SIGNING_KEY_PASS }}
+        run: |
+          dir="$RUNNER_TEMP/signing"
+          mkdir -p "$dir"
+          if [ -n "$SIGNING_KEY_B64" ]; then
+            echo "$SIGNING_KEY_B64" | base64 -d > "$dir/secret.p12"
+            echo "KEYSTORE=$dir/secret.p12" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASS=$SIGNING_KEY_PASS" >> "$GITHUB_ENV"
+          else
+            if [ ! -f "$dir/key.p12" ]; then
+              keytool -genkeypair -keystore "$dir/key.p12" -storetype PKCS12 \
+                -storepass task-filter -keypass task-filter -alias task-filter \
+                -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=task-filter"
+              echo "NEW_CACHED_KEY=1" >> "$GITHUB_ENV"
+            fi
+            echo "KEYSTORE=$dir/key.p12" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASS=task-filter" >> "$GITHUB_ENV"
+          fi
+          echo "KEY_ALIAS=task-filter" >> "$GITHUB_ENV"
+
+      - name: Save new cached signing key
+        if: env.NEW_CACHED_KEY == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/signing/key.p12
+          key: task-filter-signing-v1
+
+      - name: Build
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+          VERSION_NAME: 0.1.${{ github.run_number }}
+        run: bash build.sh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v0.1.${GITHUB_RUN_NUMBER}"
+          apk="task-filter-${tag}.apk"
+          cp build/task-filter.apk "$apk"
+          sha=$(sha256sum "$apk" | cut -d' ' -f1)
+          cert=$("$BUILD_TOOLS/apksigner" verify --print-certs "$apk" | sed -n 's/.*certificate SHA-256 digest: //p' | head -n1)
+          gh release create "$tag" "$apk" --prerelease --target "$GITHUB_SHA" \
+            --title "task-filter ${tag}" \
+            --notes "Automated build of ${GITHUB_SHA}.
+
+          - APK SHA-256: \`${sha}\`
+          - Signing certificate SHA-256: \`${cert}\`"
