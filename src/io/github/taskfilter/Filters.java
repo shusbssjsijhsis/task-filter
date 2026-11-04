@@ -84,7 +84,9 @@ final class Filters {
         hookTaskStackListener(cl, ok);
         hookPackageManager(cl, ok);
         hookLauncherApps(ok);
-        XposedBridge.log(T + "loaded in " + process + ": " + ok);
+        if (Config.verbose()) {
+            XposedBridge.log(T + "loaded in " + process + " (user " + Config.userId() + "): " + ok);
+        }
     }
 
     static void onConfigChanged() {
@@ -818,7 +820,9 @@ final class Filters {
                 summary = sb.toString();
             }
         }
-        if (summary != null) XposedBridge.log(T + "filtered so far: " + summary);
+        if (summary != null && Config.verbose()) {
+            XposedBridge.log(T + "filtered so far (user " + Config.userId() + "): " + summary);
+        }
     }
 
     static void logOnce(String where, Throwable t) {

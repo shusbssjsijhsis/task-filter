@@ -6,6 +6,8 @@ final class Prefs {
     static final String FILE = "config";
     static final String KEY_HIDDEN = "hidden";
     static final String KEY_ENABLED = "enabled";
+    /** Write the "[task-filter] ..." counters to the LSPosed log (which also reaches logcat). */
+    static final String KEY_VERBOSE = "verbose";
 
     private Prefs() {}
 }
