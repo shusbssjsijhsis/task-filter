@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Task Filter</string>
+    <string name="xposed_description">对小米服务框架隐藏指定应用：最近任务、前台应用变化、运行中的进程、使用记录和已安装应用列表。Hides selected apps from Xiaomi Service Framework (com.xiaomi.xmsf).</string>
+</resources>
