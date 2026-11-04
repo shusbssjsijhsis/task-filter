@@ -63,20 +63,23 @@
 
 ### 自动勾选
 
-设置页的「自动勾选」只在本机分析已安装的应用（不联网、不上传），按下面的顺序判断，**国内应用优先**：
+设置页的「自动勾选」只在本机分析已安装的应用（不联网、不上传），按下面的顺序判断，先命中的为准：
 
-1. 内置名单里的 root 工具、境外应用（如 Google、Telegram、X）→ 建议隐藏；
-2. 内置名单里的国内应用（腾讯、阿里、字节、运营商、银行、政务等）→ 不碰；
-3. Xposed 模块（`xposedmodule` 元数据，或 `xposed_init` / libxposed 入口文件）→ 建议隐藏；
-4. 带**国内推送、登录、支付或分享 SDK** 的（小米、OPPO、vivo、魅族、荣耀推送，个推、极光、友盟推送、腾讯 TPNS，微信、QQ、支付宝、微博、银联 SDK，运营商一键登录等）→ 国内应用，不碰——**即使它声明了 VPN 服务或申请了 Shizuku 权限**：运营商、应用商店、游戏助手常用 VPN 服务做「网络加速」；
+1. **Xposed 模块**（`xposedmodule` 元数据，或 `xposed_init` / libxposed 入口文件）→ 建议隐藏。最先检查，因为有的模块会借用国内应用的包名；
+2. 内置名单：root 工具、境外应用（如 Google、Telegram、X、加密货币钱包）→ 建议隐藏；国内大平台（腾讯、阿里、字节、运营商、银行、政务、手机厂商、游戏加速器等）→ 不碰；
+3. 内置**代理内核或分流规则库**（`geoip.dat`、`geosite.db`、`Country.mmdb`、clash / xray / sing-box 等内核）→ 代理 / VPN；带**应用分身 / 虚拟机框架**的 → root 相关工具。这两项优先于下面的国内 SDK：订阅制「加速器」常常带支付宝、微信支付；
+4. 带**国内推送、登录、支付或分享 SDK**（小米、OPPO、vivo、魅族、荣耀推送，个推、极光、友盟推送、腾讯 TPNS，微信、QQ、支付宝、微博、银联 SDK，运营商一键登录等），或**从国内官方应用商店安装**的 → 国内应用，不碰——**即使它声明了 VPN 服务或申请了 Shizuku 权限**：运营商、应用商店、游戏助手常用 VPN 服务做「网络加速」；
 5. 声明了 `BIND_VPN_SERVICE` 服务 → 代理 / VPN；申请了 Shizuku 权限 → root 相关工具；
-6. 只带 Bugly、腾讯 X5、高德、国内广告或统计等 SDK 的 → 国内应用，不碰；
-7. 使用 FCM 推送，或从 Google Play / F-Droid 安装 → 推断为境外应用；
-8. 其余列为「未识别」。
+6. 使用 FCM 推送，或从 Google Play / F-Droid 安装 → 推断为境外应用；
+7. 其余列为「未识别」，并注明安装来源；只带 Bugly、腾讯 X5、国内广告或统计 SDK 的会标出「可能是国内开发者的应用」。
 
 **系统应用、当前桌面、WebView、Google Play 服务永远不会被自动勾选**；导入时也会跳过后三者。
 
-确认分两步：先列出**已经勾选、但判断为国内应用或关键组件**的，可以一键取消勾选；再列出建议新勾选的应用，每一项都写明原因（如「声明了 VPN 服务」「内置名单」），建议项预先勾上、未识别的不勾，可以逐个调整。规则和名单不可能完全准确，确认前请过一遍。
+确认分两步：先复查少数已勾选的应用——关键组件、**自动勾选**的但现在判断为国内应用的（预先勾上，确认即取消勾选），以及用小米推送的（不预先勾，只是提醒隐藏后可能收不到通知）。**你自己勾选或导入的应用不会被质疑**。然后列出建议新勾选的应用，每一项都写明原因，建议项预先勾上、未识别的不勾，可以逐个调整。
+
+### 记住你的选择
+
+设置页会在本机（应用私有目录，不进代码、不上传）记住你的决定：复查时保留的应用以后不再提示；在建议里没勾、或在列表里手动取消勾选的应用，以后不再建议，安装时也不会自动隐藏（写进配置文件时是 `!包名` 行）。导出文件里也包含这些「拒绝过的」应用，导入时一并恢复。在列表里重新勾选即可撤销。
 
 ### 新安装的应用
 
@@ -86,7 +89,7 @@
 
 ### 导入与导出
 
-「导出」把当前勾选的应用和选项保存成一个文本文件（每行一个包名，后面用 `#` 注明应用名）。「导入」可以从这种文件恢复（包括选项），也可以直接粘贴包名：`#` 开头的行和行尾 `#` 注释会被忽略，兼容 `pm list packages` 的输出；导入只会增加勾选，不会取消已有的。导出的文件包含你的应用名单，请妥善保管，用完建议删掉。本页的输入框关闭了输入法的个性化学习、联想和自动填充。
+「导出」把当前勾选的应用、拒绝过的应用（`!` 开头）和选项保存成一个文本文件（每行一个包名，后面用 `#` 注明应用名）。「导入」可以从这种文件恢复，也可以直接粘贴包名：`#` 开头的行和行尾 `#` 注释会被忽略，兼容 `pm list packages` 的输出；导入只会增加勾选，不会取消已有的。导出的文件包含你的应用名单，请妥善保管，用完建议删掉。本页的输入框关闭了输入法的个性化学习、联想和自动填充。
 
 ## 验证
 
@@ -124,7 +127,7 @@ An LSPosed module that hides selected apps from Xiaomi Service Framework (`com.x
 
 The module is scoped to `com.xiaomi.xmsf` only and filters, inside that process, the results of `getRunningTasks`/`getRecentTasks`, `ITaskStackListener` events, `miui.process.ForegroundInfo` (rewritten to the launcher), `IProcessObserver` callbacks, `getRunningAppProcesses`/`getRunningServices`, `UsageStatsManager` queries, and package-manager/`LauncherApps` lookups (hidden apps look uninstalled). It also drops package broadcasts (install, update, uninstall and the like) about hidden apps, which the framework's `eventtracking.PackageMonitor` records together with the installer. It never touches `system_server`, and its log only contains counters, never package names.
 
-Apps can be picked by hand, imported from or exported to a text file, or suggested by an on-device "auto-select": known root tools and foreign apps, Xposed modules, VPN services, the Shizuku permission, and apps that use FCM or came from Google Play / F-Droid. Domestic evidence wins: listed domestic apps, and apps carrying a Chinese push, login, payment or sharing SDK, are never suggested even when they declare a VPN service (carriers and game helpers use one for "acceleration"), so their notifications keep working. System apps, the launcher, WebView and Play services are never suggested either. Suggestions show their reason and can be unticked one by one; ticked apps that look domestic are offered for unticking first. The same rules can hide newly installed apps before any receiver in the framework sees the install.
+Apps can be picked by hand, imported from or exported to a text file, or suggested by an on-device "auto-select": known root tools and foreign apps, Xposed modules, VPN services, the Shizuku permission, and apps that use FCM or came from Google Play / F-Droid. Xposed modules are recognised first (some borrow a domestic package name); a bundled proxy core or routing database (geoip/geosite, clash, xray ...) and app-cloning frameworks count even when the app carries domestic payment SDKs. Otherwise domestic evidence wins: listed domestic platforms, apps carrying a Chinese push, login, payment or sharing SDK, and apps installed from an official domestic store are never suggested, even when they declare a VPN service (carriers and game helpers use one for "acceleration"), so their notifications keep working. System apps, the launcher, WebView and Play services are never suggested either. Suggestions show their reason and can be unticked one by one. The settings screen remembers, on the device only, which apps the user kept or turned down, so later runs do not contradict those choices; the user's own picks are never questioned. The same rules can hide newly installed apps before any receiver in the framework sees the install.
 
 Install the APK, enable it in LSPosed with the scope "Xiaomi Service Framework" (both entries if a dual-app user exists), pick the apps in the module's settings screen, then reboot or `am force-stop com.xiaomi.xmsf`. Do not hide apps that rely on Mi Push.
 

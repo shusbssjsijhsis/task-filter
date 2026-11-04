@@ -17,6 +17,14 @@ final class Prefs {
     static final String KEY_AUTO_NEW = "auto_new";
     /** ... including apps the rules cannot place either way. */
     static final String KEY_AUTO_UNKNOWN = "auto_unknown";
+    /**
+     * The user's own decisions, kept on the device only: apps ticked by auto-select or at install time
+     * (so a later review can tell them from the user's own picks), apps the user chose to keep ticked
+     * after a review, and apps the user turned down or unticked (never suggested or auto-hidden again).
+     */
+    static final String KEY_AUTO_ADDED = "auto_added";
+    static final String KEY_KEPT = "kept";
+    static final String KEY_DECLINED = "declined";
 
     /**
      * The list handed to the hooks. The settings screen writes it with root into the target's own

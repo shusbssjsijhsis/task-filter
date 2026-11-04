@@ -102,6 +102,10 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     /** Read and written on the UI thread and by the sync worker. */
     private final Set<String> hidden = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    /** The user's decisions (see Prefs): stay on this device, never in the public code. */
+    private final Set<String> autoAdded = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private final Set<String> kept = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private final Set<String> declined = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private final List<App> all = new ArrayList<>();
     private final List<App> shown = new ArrayList<>();
     private ArrayAdapter<App> adapter;
@@ -135,6 +139,9 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences(Prefs.LOCAL_FILE, Context.MODE_PRIVATE);
         Set<String> saved = prefs.getStringSet(Prefs.KEY_HIDDEN, null);
         if (saved != null) hidden.addAll(saved);
+        loadSet(Prefs.KEY_AUTO_ADDED, autoAdded);
+        loadSet(Prefs.KEY_KEPT, kept);
+        loadSet(Prefs.KEY_DECLINED, declined);
         optEnabled = prefs.getBoolean(Prefs.KEY_ENABLED, true);
         optVerbose = prefs.getBoolean(Prefs.KEY_VERBOSE, true);
         optAutoNew = prefs.getBoolean(Prefs.KEY_AUTO_NEW, true);
@@ -450,14 +457,34 @@ public class MainActivity extends Activity {
     private void onItemClick(int position) {
         App app = shown.get(position);
         if (app.addRow) {
-            hidden.add(app.pkg);
+            tick(app.pkg, false);
             all.add(new App(app.pkg, app.pkg, false, false));
             save();
             search.setText("");
             return;
         }
-        if (list.isItemChecked(position)) hidden.add(app.pkg); else hidden.remove(app.pkg);
+        if (list.isItemChecked(position)) tick(app.pkg, false); else untick(app.pkg);
         save();
+    }
+
+    /** Ticks an app; byAuto marks it as chosen by auto-select or the hook rather than by the user. */
+    private boolean tick(String pkg, boolean byAuto) {
+        declined.remove(pkg);
+        if (byAuto) autoAdded.add(pkg); else autoAdded.remove(pkg);
+        return hidden.add(pkg);
+    }
+
+    /** Unticks an app; it will not be suggested or hidden at install time again. */
+    private boolean untick(String pkg) {
+        autoAdded.remove(pkg);
+        kept.remove(pkg);
+        declined.add(pkg);
+        return hidden.remove(pkg);
+    }
+
+    private void loadSet(String key, Set<String> into) {
+        Set<String> s = prefs.getStringSet(key, null);
+        if (s != null) into.addAll(s);
     }
 
     private void applyFilter() {
@@ -509,12 +536,15 @@ public class MainActivity extends Activity {
         updateSummary();
         final List<String> pkgs = new ArrayList<>();
         for (App a : all) pkgs.add(a.pkg);
-        final Set<String> already = new HashSet<>(hidden);
+        final Set<String> nowHidden = new HashSet<>(hidden);
+        final Set<String> nowDeclined = new HashSet<>(declined);
+        final Set<String> nowAuto = new HashSet<>(autoAdded);
+        final Set<String> nowKept = new HashSet<>(kept);
         final Context ctx = getApplicationContext();
         new Thread(() -> {
             AutoSelect.Result r;
             try {
-                r = AutoSelect.classify(ctx, pkgs, already);
+                r = AutoSelect.classify(ctx, pkgs, nowHidden, nowDeclined, nowAuto, nowKept);
             } catch (Throwable t) {
                 r = null;
             }
@@ -532,13 +562,17 @@ public class MainActivity extends Activity {
             toast("分析失败");
             return;
         }
-        if (r.untick.isEmpty()) showSuggestions(r);
-        else showUntick(r, () -> showSuggestions(r));
+        if (r.review.isEmpty()) showSuggestions(r);
+        else showReview(r, () -> showSuggestions(r));
     }
 
-    /** Step 1: apps that are ticked but judged domestic (or essential), offered for unticking. */
-    private void showUntick(final AutoSelect.Result r, final Runnable next) {
-        final List<AutoSelect.Pick> items = r.untick;
+    /**
+     * Step 1: a second look at a few ticked apps - essential components and domestic apps that
+     * auto-select ticked (pre-selected for unticking), and apps that receive Mi Push (not pre-selected).
+     * What the user keeps is remembered and not shown again; the user's own picks are not questioned.
+     */
+    private void showReview(final AutoSelect.Result r, final Runnable next) {
+        final List<AutoSelect.Pick> items = r.review;
         final boolean[] checked = new boolean[items.size()];
         CharSequence[] labels = new CharSequence[items.size()];
         for (int i = 0; i < items.size(); i++) {
@@ -546,21 +580,25 @@ public class MainActivity extends Activity {
             labels[i] = itemText(items.get(i), items.get(i).reason);
         }
         new AlertDialog.Builder(this)
-                .setCustomTitle(dialogTitle("先检查已勾选的应用（" + items.size() + " 个）",
-                        "这些已经勾选，但判断为国内应用或关键组件。勾上的会被取消勾选，恢复对小米服务框架可见；"
-                                + "没勾上的只是用了国内 SDK，可能是国内开发者做的 root / 代理工具，请自己判断。"))
+                .setCustomTitle(dialogTitle("先检查 " + items.size() + " 个已勾选的应用",
+                        "勾上的会被取消勾选，恢复对小米服务框架可见；没勾上的保留，以后不再提示。"))
                 .setMultiChoiceItems(labels, checked, (dlg, which, isChecked) -> { })
-                .setPositiveButton("取消勾选选中的", (dlg, w) -> {
+                .setPositiveButton("确定", (dlg, w) -> {
                     int n = 0;
-                    for (int i = 0; i < checked.length; i++) if (checked[i] && hidden.remove(items.get(i).pkg)) n++;
-                    if (n > 0) {
-                        applyFilter();
-                        save();
-                        toast("已取消勾选 " + n + " 个应用");
+                    for (int i = 0; i < checked.length; i++) {
+                        String pkg = items.get(i).pkg;
+                        if (checked[i]) {
+                            if (untick(pkg)) n++;
+                        } else {
+                            kept.add(pkg);
+                        }
                     }
+                    applyFilter();
+                    save();
+                    if (n > 0) toast("已取消勾选 " + n + " 个应用");
                     next.run();
                 })
-                .setNegativeButton("跳过", (dlg, w) -> next.run())
+                .setNegativeButton("以后再说", (dlg, w) -> next.run())
                 .show();
     }
 
@@ -572,6 +610,7 @@ public class MainActivity extends Activity {
                 .append(r.domestic).append(" 个");
         if (r.protectedApps > 0) skipped.append("，关键组件 ").append(r.protectedApps).append(" 个");
         if (r.failed > 0) skipped.append("，无法检查 ").append(r.failed).append(" 个");
+        if (r.declined > 0) skipped.append("，你拒绝过的 ").append(r.declined).append(" 个");
         skipped.append("。");
         if (items.isEmpty()) {
             new AlertDialog.Builder(this)
@@ -592,13 +631,21 @@ public class MainActivity extends Activity {
         String title = "自动勾选：建议 " + r.picks.size() + " 个"
                 + (r.unknown.isEmpty() ? "" : "，未识别 " + r.unknown.size() + " 个");
         final AlertDialog d = new AlertDialog.Builder(this)
-                .setCustomTitle(dialogTitle(title, skipped + "建议项已预先勾上，未识别的没有；确认前可以逐个调整。"))
+                .setCustomTitle(dialogTitle(title, skipped
+                        + "建议项已预先勾上，未识别的没有。确认后，没勾上的以后不再提示（仍可在列表里手动勾选）。"))
                 .setMultiChoiceItems(labels, checked, (dlg, which, isChecked) -> {
                     if (toggle[0] != null) toggle[0].setText(allTrue(checked) ? "全不选" : "全选");
                 })
-                .setPositiveButton("勾选选中的", (dlg, w) -> {
+                .setPositiveButton("确定", (dlg, w) -> {
                     int n = 0;
-                    for (int i = 0; i < checked.length; i++) if (checked[i] && hidden.add(items.get(i).pkg)) n++;
+                    for (int i = 0; i < checked.length; i++) {
+                        String pkg = items.get(i).pkg;
+                        if (checked[i]) {
+                            if (tick(pkg, true)) n++;
+                        } else {
+                            declined.add(pkg);
+                        }
+                    }
                     applyFilter();
                     save();
                     toast("新勾选了 " + n + " 个应用");
@@ -723,6 +770,7 @@ public class MainActivity extends Activity {
         int found = 0;
         int added = 0;
         int skipped = 0;
+        int refused = 0;
         for (String raw : text.split("\r\n|\r|\n")) {
             String line = raw;
             int hash = line.indexOf('#');
@@ -734,6 +782,11 @@ public class MainActivity extends Activity {
                 options.put(option.group(1), "1".equals(option.group(2)));
                 continue;
             }
+            if (line.startsWith("!")) { // turned down: never suggested or auto-hidden
+                String pkg = line.substring(1).trim().split("[\\s,;，；]+", 2)[0];
+                if (Prefs.isPackageName(pkg) && !hidden.contains(pkg) && declined.add(pkg)) refused++;
+                continue;
+            }
             if (line.startsWith("package:")) line = line.substring("package:".length()).trim();
             String pkg = line.split("[\\s,;，；]+", 2)[0];
             if (!Prefs.isPackageName(pkg)) continue;
@@ -742,9 +795,9 @@ public class MainActivity extends Activity {
                 skipped++;
                 continue;
             }
-            if (hidden.add(pkg)) added++;
+            if (tick(pkg, false)) added++;
         }
-        if (found == 0 && options.isEmpty()) {
+        if (found == 0 && options.isEmpty() && refused == 0) {
             toast("没有找到包名");
             return;
         }
@@ -753,6 +806,7 @@ public class MainActivity extends Activity {
         reload();
         toast("识别到 " + found + " 个包名，新增 " + added + " 个"
                 + (options.isEmpty() ? "" : "，已恢复选项")
+                + (refused > 0 ? "，记住了 " + refused + " 个你拒绝过的" : "")
                 + (skipped > 0 ? "；跳过桌面 / WebView 等关键组件 " + skipped + " 个" : ""));
     }
 
@@ -802,15 +856,22 @@ public class MainActivity extends Activity {
         sb.append("auto=").append(optAutoNew ? 1 : 0).append('\n');
         sb.append("autounknown=").append(optAutoUnknown ? 1 : 0).append('\n');
         sb.append('\n');
-        for (String pkg : pkgs) {
-            sb.append(pkg);
-            String label = labels.get(pkg);
-            if (label != null && !label.equals(pkg)) {
-                sb.append("    # ").append(label.replaceAll("[\\r\\n]+", " ").trim());
-            }
-            sb.append('\n');
+        for (String pkg : pkgs) appendEntry(sb, "", pkg, labels);
+        List<String> no = new ArrayList<>(declined);
+        no.removeAll(hidden);
+        if (!no.isEmpty()) {
+            Collections.sort(no);
+            sb.append("\n# 以 ! 开头的是你拒绝过的：自动勾选和安装时隐藏都不会再选它们\n");
+            for (String pkg : no) appendEntry(sb, "!", pkg, labels);
         }
         return sb.toString();
+    }
+
+    private static void appendEntry(StringBuilder sb, String prefix, String pkg, Map<String, String> labels) {
+        sb.append(prefix).append(pkg);
+        String label = labels.get(pkg);
+        if (label != null && !label.equals(pkg)) sb.append("    # ").append(label.replaceAll("[\\r\\n]+", " ").trim());
+        sb.append('\n');
     }
 
     private void writeExport(final Uri uri) {
@@ -838,6 +899,9 @@ public class MainActivity extends Activity {
     private void persist() {
         prefs.edit()
                 .putStringSet(Prefs.KEY_HIDDEN, new HashSet<>(hidden))
+                .putStringSet(Prefs.KEY_AUTO_ADDED, new HashSet<>(autoAdded))
+                .putStringSet(Prefs.KEY_KEPT, new HashSet<>(kept))
+                .putStringSet(Prefs.KEY_DECLINED, new HashSet<>(declined))
                 .putBoolean(Prefs.KEY_ENABLED, optEnabled)
                 .putBoolean(Prefs.KEY_VERBOSE, optVerbose)
                 .putBoolean(Prefs.KEY_AUTO_NEW, optAutoNew)
@@ -865,7 +929,7 @@ public class MainActivity extends Activity {
         SyncResult res = writeConfigAsRoot(buildConfig());
         int merged = 0;
         for (String pkg : res.auto) {
-            if (Prefs.isPackageName(pkg) && !Prefs.MODULE.equals(pkg) && hidden.add(pkg)) merged++;
+            if (Prefs.isPackageName(pkg) && !Prefs.MODULE.equals(pkg) && tick(pkg, true)) merged++;
         }
         if (merged > 0) persist(); // the file just written already contains them
         final String msg = res.message(merged);
@@ -888,6 +952,13 @@ public class MainActivity extends Activity {
         Collections.sort(pkgs);
         for (String pkg : pkgs) {
             if (Prefs.isPackageName(pkg)) sb.append(pkg).append('\n');
+        }
+        // Turned down by the user: the hook never hides these at install time.
+        List<String> no = new ArrayList<>(declined);
+        no.removeAll(hidden);
+        Collections.sort(no);
+        for (String pkg : no) {
+            if (Prefs.isPackageName(pkg)) sb.append('!').append(pkg).append('\n');
         }
         return sb.toString();
     }

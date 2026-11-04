@@ -796,7 +796,7 @@ final class Filters {
 
     /** A new install: hide it now if it matches the automatic rules (decided once per package). */
     private static boolean autoHide(Context ctx, String pkg) {
-        if (!Config.autoNew()) return false;
+        if (!Config.autoNew() || Config.neverAuto().contains(pkg)) return false;
         Boolean decided = AUTO_DECIDED.get(pkg);
         if (decided != null) return decided;
         if (ctx == null) ctx = currentApplication();
