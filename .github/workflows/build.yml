@@ -21,10 +21,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -32,7 +32,8 @@ jobs:
       - name: Locate Android SDK
         run: |
           bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
-          plat=$(ls -d "$ANDROID_HOME"/platforms/android-* | sort -V | tail -n1)
+          # Newest stable platform: skip previews such as android-37.2-beta3.
+          plat=$(ls -d "$ANDROID_HOME"/platforms/android-* | grep -E '/android-[0-9]+$' | sort -V | tail -n1)
           echo "BUILD_TOOLS=$bt" >> "$GITHUB_ENV"
           echo "ANDROID_JAR=$plat/android.jar" >> "$GITHUB_ENV"
           echo "build-tools: $bt"
@@ -50,7 +51,7 @@ jobs:
       # place as long as the cache entry lives (it is evicted after 7 days without a build).
       - name: Restore cached signing key
         id: key
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/signing/key.p12
           key: task-filter-signing-v1
@@ -80,7 +81,7 @@ jobs:
 
       - name: Save new cached signing key
         if: env.NEW_CACHED_KEY == '1'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/signing/key.p12
           key: task-filter-signing-v1
