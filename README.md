@@ -63,14 +63,20 @@
 
 ### 自动勾选
 
-设置页的「自动勾选」只在本机分析已安装的应用（不联网、不上传），先列出建议，确认后才勾选：
+设置页的「自动勾选」只在本机分析已安装的应用（不联网、不上传），按下面的顺序判断，**国内应用优先**：
 
-- 会被建议隐藏：**代理 / VPN**（声明了 `BIND_VPN_SERVICE` 服务）、**Xposed 模块**（`xposedmodule` 元数据，或 `xposed_init` / libxposed 入口文件）、**root 及相关工具**（内置名单，或申请了 Shizuku 权限）、**境外应用**（内置名单，如 Google、Telegram、X），以及**根据 FCM 推送 SDK 或 Google Play / F-Droid 安装来源推断为境外**的应用。
-- 带**小米推送或其他国内推送 SDK**（OPPO、vivo、魅族、荣耀、个推、极光、友盟、腾讯 TPNS、阿里、百度）的应用视为国内应用，**不会被建议**：对小米服务框架隐藏它们可能导致收不到通知。代理、Xposed 模块、root 工具和名单里的境外应用例外，列表里会标出「含国内推送」。
-- **系统应用、当前桌面、WebView、Google Play 服务永远不会被自动勾选**；导入时也会跳过后三者。
-- 两边都看不出来的应用列为「未识别」，默认不勾选，可以选「连同未识别」一起勾上。
+1. 内置名单里的 root 工具、境外应用（如 Google、Telegram、X）→ 建议隐藏；
+2. 内置名单里的国内应用（腾讯、阿里、字节、运营商、银行、政务等）→ 不碰；
+3. Xposed 模块（`xposedmodule` 元数据，或 `xposed_init` / libxposed 入口文件）→ 建议隐藏；
+4. 带**国内推送、登录、支付或分享 SDK** 的（小米、OPPO、vivo、魅族、荣耀推送，个推、极光、友盟推送、腾讯 TPNS，微信、QQ、支付宝、微博、银联 SDK，运营商一键登录等）→ 国内应用，不碰——**即使它声明了 VPN 服务或申请了 Shizuku 权限**：运营商、应用商店、游戏助手常用 VPN 服务做「网络加速」；
+5. 声明了 `BIND_VPN_SERVICE` 服务 → 代理 / VPN；申请了 Shizuku 权限 → root 相关工具；
+6. 只带 Bugly、腾讯 X5、高德、国内广告或统计等 SDK 的 → 国内应用，不碰；
+7. 使用 FCM 推送，或从 Google Play / F-Droid 安装 → 推断为境外应用；
+8. 其余列为「未识别」。
 
-规则和内置名单不可能完全准确，勾选前请把建议列表过一遍。
+**系统应用、当前桌面、WebView、Google Play 服务永远不会被自动勾选**；导入时也会跳过后三者。
+
+确认分两步：先列出**已经勾选、但判断为国内应用或关键组件**的，可以一键取消勾选；再列出建议新勾选的应用，每一项都写明原因（如「声明了 VPN 服务」「内置名单」），建议项预先勾上、未识别的不勾，可以逐个调整。规则和名单不可能完全准确，确认前请过一遍。
 
 ### 新安装的应用
 
@@ -78,9 +84,9 @@
 
 已勾选应用的安装、更新、卸载广播一律不会到达小米服务框架。
 
-### 导入列表
+### 导入与导出
 
-「导入列表」可以粘贴包名（每行一个；`#` 开头的行和行尾 `#` 注释会被忽略；兼容 `pm list packages` 的输出），也可以从文件导入。导入后建议把文件删掉。本页的输入框关闭了输入法的个性化学习、联想和自动填充。
+「导出」把当前勾选的应用和选项保存成一个文本文件（每行一个包名，后面用 `#` 注明应用名）。「导入」可以从这种文件恢复（包括选项），也可以直接粘贴包名：`#` 开头的行和行尾 `#` 注释会被忽略，兼容 `pm list packages` 的输出；导入只会增加勾选，不会取消已有的。导出的文件包含你的应用名单，请妥善保管，用完建议删掉。本页的输入框关闭了输入法的个性化学习、联想和自动填充。
 
 ## 验证
 
@@ -118,7 +124,7 @@ An LSPosed module that hides selected apps from Xiaomi Service Framework (`com.x
 
 The module is scoped to `com.xiaomi.xmsf` only and filters, inside that process, the results of `getRunningTasks`/`getRecentTasks`, `ITaskStackListener` events, `miui.process.ForegroundInfo` (rewritten to the launcher), `IProcessObserver` callbacks, `getRunningAppProcesses`/`getRunningServices`, `UsageStatsManager` queries, and package-manager/`LauncherApps` lookups (hidden apps look uninstalled). It also drops package broadcasts (install, update, uninstall and the like) about hidden apps, which the framework's `eventtracking.PackageMonitor` records together with the installer. It never touches `system_server`, and its log only contains counters, never package names.
 
-Apps can be picked by hand, imported as a list, or suggested by an on-device "auto-select": VPN services, Xposed modules, root tools, known foreign apps, and apps that use FCM or came from Google Play / F-Droid. System apps, the launcher, WebView, Play services, and apps carrying Mi Push or another Chinese push SDK are never suggested, so their notifications keep working. The same rules can hide newly installed apps before any receiver in the framework sees the install.
+Apps can be picked by hand, imported from or exported to a text file, or suggested by an on-device "auto-select": known root tools and foreign apps, Xposed modules, VPN services, the Shizuku permission, and apps that use FCM or came from Google Play / F-Droid. Domestic evidence wins: listed domestic apps, and apps carrying a Chinese push, login, payment or sharing SDK, are never suggested even when they declare a VPN service (carriers and game helpers use one for "acceleration"), so their notifications keep working. System apps, the launcher, WebView and Play services are never suggested either. Suggestions show their reason and can be unticked one by one; ticked apps that look domestic are offered for unticking first. The same rules can hide newly installed apps before any receiver in the framework sees the install.
 
 Install the APK, enable it in LSPosed with the scope "Xiaomi Service Framework" (both entries if a dual-app user exists), pick the apps in the module's settings screen, then reboot or `am force-stop com.xiaomi.xmsf`. Do not hide apps that rely on Mi Push.
 

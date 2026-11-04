@@ -36,9 +36,11 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.Collator;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -49,6 +51,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Settings screen: pick the apps to hide. Built in code so the module needs no layout resources.
@@ -71,7 +75,10 @@ public class MainActivity extends Activity {
     private static final String MIUI_GET_INSTALLED_APPS = "com.android.permission.GET_INSTALLED_APPS";
     private static final int REQ_APPS = 1;
     private static final int REQ_IMPORT = 2;
+    private static final int REQ_EXPORT = 3;
     private static final int MAX_IMPORT_BYTES = 1 << 20;
+    /** Option lines in an exported file, restored on import. */
+    private static final Pattern OPTION = Pattern.compile("(enabled|verbose|auto|autounknown)=([01])");
 
     static final class App {
         final String pkg;
@@ -114,6 +121,12 @@ public class MainActivity extends Activity {
     private volatile boolean optVerbose = true;
     private volatile boolean optAutoNew = true;
     private volatile boolean optAutoUnknown;
+    private CheckBox cbEnabled;
+    private CheckBox cbVerbose;
+    private CheckBox cbAutoNew;
+    private CheckBox cbAutoUnknown;
+    /** Set while options are applied in code, so each change does not write on its own. */
+    private boolean suppress;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -147,44 +160,44 @@ public class MainActivity extends Activity {
                 + "不要勾选依赖小米推送的应用（微信、QQ、企业微信、钉钉等）。");
         root.addView(info);
 
-        CheckBox enabled = new CheckBox(this);
-        enabled.setText("启用过滤");
-        enabled.setChecked(optEnabled);
-        enabled.setOnCheckedChangeListener((b, checked) -> {
+        cbEnabled = new CheckBox(this);
+        cbEnabled.setText("启用过滤");
+        cbEnabled.setChecked(optEnabled);
+        cbEnabled.setOnCheckedChangeListener((b, checked) -> {
             optEnabled = checked;
-            save();
+            if (!suppress) save();
         });
-        root.addView(enabled);
+        root.addView(cbEnabled);
 
-        final CheckBox autoUnknown = new CheckBox(this);
-        CheckBox autoNew = new CheckBox(this);
-        autoNew.setText("新安装的应用符合规则时立即隐藏（境外 / 代理 / Xposed / root）");
-        autoNew.setChecked(optAutoNew);
-        autoNew.setOnCheckedChangeListener((b, checked) -> {
+        cbAutoNew = new CheckBox(this);
+        cbAutoUnknown = new CheckBox(this);
+        cbAutoNew.setText("新安装的应用符合规则时立即隐藏（境外 / 代理 / Xposed / root，国内应用不会）");
+        cbAutoNew.setChecked(optAutoNew);
+        cbAutoNew.setOnCheckedChangeListener((b, checked) -> {
             optAutoNew = checked;
-            autoUnknown.setEnabled(checked);
-            save();
+            cbAutoUnknown.setEnabled(checked);
+            if (!suppress) save();
         });
-        root.addView(autoNew);
+        root.addView(cbAutoNew);
 
-        autoUnknown.setText("也包括未识别的应用（没有国内推送，也看不出来源）");
-        autoUnknown.setChecked(optAutoUnknown);
-        autoUnknown.setEnabled(optAutoNew);
-        autoUnknown.setPadding(dp(24), 0, 0, 0);
-        autoUnknown.setOnCheckedChangeListener((b, checked) -> {
+        cbAutoUnknown.setText("也包括未识别的应用（看不出是国内还是境外）");
+        cbAutoUnknown.setChecked(optAutoUnknown);
+        cbAutoUnknown.setEnabled(optAutoNew);
+        cbAutoUnknown.setPadding(dp(24), 0, 0, 0);
+        cbAutoUnknown.setOnCheckedChangeListener((b, checked) -> {
             optAutoUnknown = checked;
-            save();
+            if (!suppress) save();
         });
-        root.addView(autoUnknown);
+        root.addView(cbAutoUnknown);
 
-        CheckBox verbose = new CheckBox(this);
-        verbose.setText("记录日志（只记次数，不记应用名；确认生效后建议关闭）");
-        verbose.setChecked(optVerbose);
-        verbose.setOnCheckedChangeListener((b, checked) -> {
+        cbVerbose = new CheckBox(this);
+        cbVerbose.setText("记录日志（只记次数，不记应用名；确认生效后建议关闭）");
+        cbVerbose.setChecked(optVerbose);
+        cbVerbose.setOnCheckedChangeListener((b, checked) -> {
             optVerbose = checked;
-            save();
+            if (!suppress) save();
         });
-        root.addView(verbose);
+        root.addView(cbVerbose);
 
         showSystem = new CheckBox(this);
         showSystem.setText("显示系统应用");
@@ -217,9 +230,13 @@ public class MainActivity extends Activity {
         auto.setOnClickListener(v -> runAutoSelect());
         actions.addView(auto, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         Button importList = new Button(this);
-        importList.setText("导入列表");
+        importList.setText("导入");
         importList.setOnClickListener(v -> showImportDialog());
         actions.addView(importList, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button export = new Button(this);
+        export.setText("导出");
+        export.setOnClickListener(v -> startExport());
+        actions.addView(export, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(actions);
 
         source = new TextView(this);
@@ -515,58 +532,116 @@ public class MainActivity extends Activity {
             toast("分析失败");
             return;
         }
-        StringBuilder sb = new StringBuilder();
-        if (r.picks.isEmpty()) {
-            sb.append("没有发现需要新勾选的已识别应用。\n");
-        } else {
-            sb.append("将新勾选 ").append(r.picks.size()).append(" 个应用：\n");
-            AutoSelect.Kind current = null;
-            for (AutoSelect.Pick p : r.picks) {
-                if (p.kind != current) {
-                    current = p.kind;
-                    sb.append("\n【").append(current.title).append("】\n");
-                }
-                describe(sb, p);
+        if (r.untick.isEmpty()) showSuggestions(r);
+        else showUntick(r, () -> showSuggestions(r));
+    }
+
+    /** Step 1: apps that are ticked but judged domestic (or essential), offered for unticking. */
+    private void showUntick(final AutoSelect.Result r, final Runnable next) {
+        final List<AutoSelect.Pick> items = r.untick;
+        final boolean[] checked = new boolean[items.size()];
+        CharSequence[] labels = new CharSequence[items.size()];
+        for (int i = 0; i < items.size(); i++) {
+            checked[i] = items.get(i).preChecked;
+            labels[i] = itemText(items.get(i), items.get(i).reason);
+        }
+        new AlertDialog.Builder(this)
+                .setCustomTitle(dialogTitle("先检查已勾选的应用（" + items.size() + " 个）",
+                        "这些已经勾选，但判断为国内应用或关键组件。勾上的会被取消勾选，恢复对小米服务框架可见；"
+                                + "没勾上的只是用了国内 SDK，可能是国内开发者做的 root / 代理工具，请自己判断。"))
+                .setMultiChoiceItems(labels, checked, (dlg, which, isChecked) -> { })
+                .setPositiveButton("取消勾选选中的", (dlg, w) -> {
+                    int n = 0;
+                    for (int i = 0; i < checked.length; i++) if (checked[i] && hidden.remove(items.get(i).pkg)) n++;
+                    if (n > 0) {
+                        applyFilter();
+                        save();
+                        toast("已取消勾选 " + n + " 个应用");
+                    }
+                    next.run();
+                })
+                .setNegativeButton("跳过", (dlg, w) -> next.run())
+                .show();
+    }
+
+    /** Step 2: suggestions for apps not ticked yet; recognised ones pre-selected, unknown ones not. */
+    private void showSuggestions(final AutoSelect.Result r) {
+        final List<AutoSelect.Pick> items = new ArrayList<>(r.picks);
+        items.addAll(r.unknown);
+        StringBuilder skipped = new StringBuilder("已跳过：系统应用 ").append(r.system).append(" 个，国内应用 ")
+                .append(r.domestic).append(" 个");
+        if (r.protectedApps > 0) skipped.append("，关键组件 ").append(r.protectedApps).append(" 个");
+        if (r.failed > 0) skipped.append("，无法检查 ").append(r.failed).append(" 个");
+        skipped.append("。");
+        if (items.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("自动勾选")
+                    .setMessage("没有发现需要新勾选的应用。\n" + skipped)
+                    .setPositiveButton("好", null)
+                    .show();
+            return;
+        }
+        final boolean[] checked = new boolean[items.size()];
+        CharSequence[] labels = new CharSequence[items.size()];
+        for (int i = 0; i < items.size(); i++) {
+            AutoSelect.Pick p = items.get(i);
+            checked[i] = p.preChecked;
+            labels[i] = itemText(p, p.kind.title + " · " + p.reason);
+        }
+        final Button[] toggle = new Button[1];
+        String title = "自动勾选：建议 " + r.picks.size() + " 个"
+                + (r.unknown.isEmpty() ? "" : "，未识别 " + r.unknown.size() + " 个");
+        final AlertDialog d = new AlertDialog.Builder(this)
+                .setCustomTitle(dialogTitle(title, skipped + "建议项已预先勾上，未识别的没有；确认前可以逐个调整。"))
+                .setMultiChoiceItems(labels, checked, (dlg, which, isChecked) -> {
+                    if (toggle[0] != null) toggle[0].setText(allTrue(checked) ? "全不选" : "全选");
+                })
+                .setPositiveButton("勾选选中的", (dlg, w) -> {
+                    int n = 0;
+                    for (int i = 0; i < checked.length; i++) if (checked[i] && hidden.add(items.get(i).pkg)) n++;
+                    applyFilter();
+                    save();
+                    toast("新勾选了 " + n + " 个应用");
+                })
+                .setNeutralButton("全选", null)
+                .setNegativeButton("取消", null)
+                .create();
+        d.show();
+        toggle[0] = d.getButton(AlertDialog.BUTTON_NEUTRAL);
+        toggle[0].setText(allTrue(checked) ? "全不选" : "全选");
+        toggle[0].setOnClickListener(v -> { // keeps the dialog open
+            boolean value = !allTrue(checked);
+            for (int i = 0; i < checked.length; i++) {
+                checked[i] = value;
+                d.getListView().setItemChecked(i, value);
             }
-        }
-        if (!r.unknown.isEmpty()) {
-            sb.append("\n【未识别 ").append(r.unknown.size()).append(" 个】没有国内推送 SDK，也看不出是境外应用，默认不勾选：\n");
-            for (AutoSelect.Pick p : r.unknown) describe(sb, p);
-        }
-        sb.append("\n已跳过：系统应用 ").append(r.system).append(" 个，国内应用 ").append(r.domestic)
-                .append(" 个（带小米推送等国内推送，或在内置名单里）");
-        if (r.protectedApps > 0) sb.append("，桌面 / WebView 等关键组件 ").append(r.protectedApps).append(" 个");
-        if (r.failed > 0) sb.append("，无法检查 ").append(r.failed).append(" 个");
-        sb.append("。勾选后仍可在列表里逐个取消。");
-
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle("自动勾选")
-                .setMessage(sb)
-                .setNegativeButton("取消", null);
-        if (!r.picks.isEmpty()) {
-            b.setPositiveButton("勾选 " + r.picks.size() + " 个", (d, w) -> applyPicks(r.picks, null));
-        }
-        if (!r.unknown.isEmpty()) {
-            b.setNeutralButton("连同未识别共 " + (r.picks.size() + r.unknown.size()) + " 个",
-                    (d, w) -> applyPicks(r.picks, r.unknown));
-        }
-        b.show();
+            toggle[0].setText(value ? "全不选" : "全选");
+        });
     }
 
-    private static void describe(StringBuilder sb, AutoSelect.Pick p) {
-        sb.append("• ").append(p.label);
-        if (!p.label.equals(p.pkg)) sb.append("（").append(p.pkg).append("）");
-        if (p.cnPush) sb.append(" ⚠ 含国内推送，隐藏后它的通知可能收不到");
-        sb.append('\n');
+    private static boolean allTrue(boolean[] a) {
+        for (boolean b : a) if (!b) return false;
+        return true;
     }
 
-    private void applyPicks(List<AutoSelect.Pick> picks, List<AutoSelect.Pick> unknown) {
-        int before = hidden.size();
-        for (AutoSelect.Pick p : picks) hidden.add(p.pkg);
-        if (unknown != null) for (AutoSelect.Pick p : unknown) hidden.add(p.pkg);
-        applyFilter();
-        save();
-        toast("新勾选了 " + (hidden.size() - before) + " 个应用");
+    private static String itemText(AutoSelect.Pick p, String tag) {
+        return p.label + (p.label.equals(p.pkg) ? "" : "（" + p.pkg + "）") + "\n" + tag;
+    }
+
+    private View dialogTitle(String title, String detail) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(24), dp(20), dp(24), dp(8));
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        box.addView(t);
+        TextView d = new TextView(this);
+        d.setText(detail);
+        d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        d.setPadding(0, dp(6), 0, 0);
+        box.addView(d);
+        return box;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -605,7 +680,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_IMPORT || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (requestCode == REQ_EXPORT) {
+            writeExport(data.getData());
+            return;
+        }
+        if (requestCode != REQ_IMPORT) return;
         final Uri uri = data.getData();
         new Thread(() -> {
             String text = null;
@@ -627,7 +707,10 @@ public class MainActivity extends Activity {
         }, "import").start();
     }
 
-    /** Adds every package named in the text: one per line, '#' comments, `pm list packages` output. */
+    /**
+     * Adds every package named in the text (one per line, '#' comments, `pm list packages` output) and
+     * restores the option lines of an exported file.
+     */
     private void importText(String text) {
         if (text == null) return;
         Set<String> prot;
@@ -636,6 +719,7 @@ public class MainActivity extends Activity {
         } catch (Throwable t) {
             prot = new HashSet<>(Arrays.asList(Prefs.MODULE, Prefs.TARGET));
         }
+        Map<String, Boolean> options = new HashMap<>();
         int found = 0;
         int added = 0;
         int skipped = 0;
@@ -645,6 +729,11 @@ public class MainActivity extends Activity {
             if (hash >= 0) line = line.substring(0, hash);
             line = line.trim();
             if (line.isEmpty()) continue;
+            Matcher option = OPTION.matcher(line);
+            if (option.matches()) {
+                options.put(option.group(1), "1".equals(option.group(2)));
+                continue;
+            }
             if (line.startsWith("package:")) line = line.substring("package:".length()).trim();
             String pkg = line.split("[\\s,;，；]+", 2)[0];
             if (!Prefs.isPackageName(pkg)) continue;
@@ -655,14 +744,92 @@ public class MainActivity extends Activity {
             }
             if (hidden.add(pkg)) added++;
         }
-        if (found == 0) {
+        if (found == 0 && options.isEmpty()) {
             toast("没有找到包名");
             return;
         }
+        if (!options.isEmpty()) applyOptions(options);
         save();
         reload();
         toast("识别到 " + found + " 个包名，新增 " + added + " 个"
+                + (options.isEmpty() ? "" : "，已恢复选项")
                 + (skipped > 0 ? "；跳过桌面 / WebView 等关键组件 " + skipped + " 个" : ""));
+    }
+
+    private void applyOptions(Map<String, Boolean> o) {
+        suppress = true;
+        try {
+            if (o.containsKey("enabled")) cbEnabled.setChecked(o.get("enabled"));
+            if (o.containsKey("verbose")) cbVerbose.setChecked(o.get("verbose"));
+            if (o.containsKey("auto")) cbAutoNew.setChecked(o.get("auto"));
+            if (o.containsKey("autounknown")) cbAutoUnknown.setChecked(o.get("autounknown"));
+        } finally {
+            suppress = false;
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Export
+
+    private void startExport() {
+        if (hidden.isEmpty()) {
+            toast("还没有勾选任何应用");
+            return;
+        }
+        String name = "task-filter-" + new SimpleDateFormat("yyyyMMdd", Locale.ROOT).format(new Date()) + ".txt";
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("text/plain").putExtra(Intent.EXTRA_TITLE, name);
+        try {
+            startActivityForResult(i, REQ_EXPORT);
+        } catch (Throwable t) {
+            toast("没有可用的文件选择器");
+        }
+    }
+
+    /** The same format the import reads: option lines, then one package per line with its name as a comment. */
+    private String exportText() {
+        Map<String, String> labels = new HashMap<>();
+        for (App a : all) labels.put(a.pkg, a.label);
+        List<String> pkgs = new ArrayList<>(hidden);
+        Collections.sort(pkgs);
+        StringBuilder sb = new StringBuilder();
+        sb.append("# Task Filter 配置，导出于 ")
+                .append(new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.ROOT).format(new Date())).append('\n');
+        sb.append("# 共 ").append(pkgs.size()).append(" 个应用。Task Filter →「导入」→「从文件选择…」可以恢复，包括下面的选项。\n");
+        sb.append("# 这份文件包含你的应用名单，请妥善保管，不要公开。\n");
+        sb.append("enabled=").append(optEnabled ? 1 : 0).append('\n');
+        sb.append("verbose=").append(optVerbose ? 1 : 0).append('\n');
+        sb.append("auto=").append(optAutoNew ? 1 : 0).append('\n');
+        sb.append("autounknown=").append(optAutoUnknown ? 1 : 0).append('\n');
+        sb.append('\n');
+        for (String pkg : pkgs) {
+            sb.append(pkg);
+            String label = labels.get(pkg);
+            if (label != null && !label.equals(pkg)) {
+                sb.append("    # ").append(label.replaceAll("[\\r\\n]+", " ").trim());
+            }
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    private void writeExport(final Uri uri) {
+        final String content = exportText();
+        final int count = hidden.size();
+        new Thread(() -> {
+            boolean ok = false;
+            try (OutputStream out = getContentResolver().openOutputStream(uri, "w")) {
+                if (out != null) {
+                    out.write(content.getBytes(StandardCharsets.UTF_8));
+                    ok = true;
+                }
+            } catch (Throwable ignored) {
+            }
+            final boolean done = ok;
+            runOnUiThread(() -> toast(done
+                    ? "已导出 " + count + " 个应用。文件里是你的应用名单，请妥善保管"
+                    : "导出失败"));
+        }, "export").start();
     }
 
     // ------------------------------------------------------------------------------------------
