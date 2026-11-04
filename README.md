@@ -31,15 +31,19 @@
 
 所有改动都发生在小米服务框架进程内，不修改系统框架，出问题时最多影响小米服务框架本身，取消作用域即可恢复。
 
+勾选列表存在设置界面自己的私有目录里（`MODE_PRIVATE`，非全局可读），改动时再用 root 写一份到小米服务框架每个用户的数据目录 `/data/user_de/<用户>/com.xiaomi.xmsf/files/.task-filter`（文件权限 600，属主和 SELinux 上下文与该目录一致），钩子从所在进程的沙盒里读取。这样不依赖 LSPosed 已废弃的 `XSharedPreferences`，也不会产生全局可读的配置文件。
+
 ## 安装
 
 1. 从 [Releases](../../releases) 下载 APK 并安装。
-2. LSPosed 管理器 → 模块 → 启用 **Task Filter**，作用域勾选 **小米服务框架**。如果开了应用双开（用户 999），列表里两个小米服务框架都要勾。
-3. 打开 Task Filter，勾选要隐藏的应用，约 3 秒后自动生效。
+2. 在 KernelSU/Magisk 里给 **Task Filter** 授予 root。设置是通过 root 写入小米服务框架的数据目录的，没有 root 不会生效。
+3. LSPosed 管理器 → 模块 → 启用 **Task Filter**，作用域勾选 **小米服务框架**。如果开了应用双开（用户 999），列表里两个小米服务框架都要勾。
+4. 打开 Task Filter，勾选要隐藏的应用。首次会弹出 root 授权，允许后页面下方会显示「已写入 N 个用户空间」，约 3 秒后生效。
    - HyperOS/MIUI 会先弹出「读取应用列表」权限，请允许，否则只能看到系统应用。
-   - 如果在 KernelSU/Magisk 里给 Task Filter 授予 root，它还会用 `pm list packages` 补全被其他隐藏模块挡住的应用。
    - 列表里找不到的应用，可以在搜索框输入完整包名，点「＋ 手动添加」。
-4. 重启手机，或在 root shell 里执行 `am force-stop com.xiaomi.xmsf`，让小米服务框架以加载了模块的状态重新启动。
+5. 重启手机，或在 root shell 里执行 `am force-stop com.xiaomi.xmsf`，让小米服务框架以加载了模块的状态重新启动。
+
+> 从 0.1.4 及更早版本升级：设置的存储方式变了——改为用 root 写入小米服务框架自己的数据目录，不再使用 LSPosed 的 `XSharedPreferences`（因此不再有「使用了已废弃功能」的提示）。升级后请重新打开 Task Filter、重新勾选一次应用。
 
 ### 应用双开（用户 999）
 
@@ -55,7 +59,7 @@
 
 ## 验证
 
-- LSPosed 日志里应该有 `[task-filter] loaded in com.xiaomi.xmsf (user 0): [...]`（双开空间是 `user 999`），方括号里是生效的钩子；`config (user N): ... settings found / from user 0` 表示读到了勾选列表；`filtered so far ...` 是累计过滤次数。模块的日志只记次数，从不记应用名：
+- LSPosed 日志里应该有 `[task-filter] loaded in com.xiaomi.xmsf (user 0): [...]`（双开空间是 `user 999`），方括号里是生效的钩子；`config (user N): X app(s) hidden` 表示读到了勾选列表（X 为隐藏的应用数）；`filtered so far ...` 是累计过滤次数。模块的日志只记次数，从不记应用名：
 
   ```
   su -c "grep -h 'task-filter' /data/adb/lspd/log/modules*.log | tail -n 30"

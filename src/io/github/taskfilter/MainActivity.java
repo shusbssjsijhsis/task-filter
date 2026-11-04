@@ -25,6 +25,7 @@ import android.widget.TextView;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.Collator;
 import java.util.ArrayList;
@@ -36,22 +37,26 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 
 /**
  * Settings screen: pick the apps to hide. Built in code so the module needs no layout resources.
  *
+ * The selection is stored in this app's own private preferences and, on every change, written with
+ * root into Xiaomi Service Framework's own data directory for each user
+ * ({@code /data/user_de/<u>/com.xiaomi.xmsf/files/.task-filter}), where the hook reads it from inside
+ * that process. This replaces LSPosed's deprecated {@code XSharedPreferences}: nothing is
+ * world-readable and the module declares no {@code xposedsharedprefs}.
+ *
  * The app list is gathered from every source available, because HyperOS/MIUI only returns system
  * apps to callers that lack its "read installed apps" permission, and other hiding modules may hide
  * apps from this screen too: the package manager, launcher activities, and (when root is granted)
- * `pm list packages`. A package can also be typed in by hand.
+ * {@code pm list packages}. A package can also be typed in by hand.
  */
 public class MainActivity extends Activity {
 
     /** HyperOS/MIUI runtime permission that gates getInstalledApplications() for third-party apps. */
     private static final String MIUI_GET_INSTALLED_APPS = "com.android.permission.GET_INSTALLED_APPS";
     private static final int REQ_APPS = 1;
-    private static final Pattern PACKAGE = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+");
 
     static final class App {
         final String pkg;
@@ -84,23 +89,17 @@ public class MainActivity extends Activity {
     private CheckBox verbose;
     private TextView summary;
     private TextView source;
+    private TextView syncStatus;
     private volatile boolean loading;
     private Boolean lastPermissionState;
 
     @Override
-    @SuppressWarnings("deprecation") // MODE_WORLD_READABLE is what LSPosed's XSharedPreferences expects
     protected void onCreate(Bundle savedInstanceState) {
         if (Build.VERSION.SDK_INT >= 29) setTheme(android.R.style.Theme_DeviceDefault_DayNight);
         super.onCreate(savedInstanceState);
-        try {
-            prefs = getSharedPreferences(Prefs.FILE, Context.MODE_WORLD_READABLE);
-        } catch (SecurityException e) {
-            prefs = null; // LSPosed has not enabled this module, so the hooks could not read anything
-        }
-        if (prefs != null) {
-            Set<String> saved = prefs.getStringSet(Prefs.KEY_HIDDEN, null);
-            if (saved != null) hidden.addAll(saved);
-        }
+        prefs = getSharedPreferences(Prefs.LOCAL_FILE, Context.MODE_PRIVATE);
+        Set<String> saved = prefs.getStringSet(Prefs.KEY_HIDDEN, null);
+        if (saved != null) hidden.addAll(saved);
 
         int pad = dp(16);
         LinearLayout root = new LinearLayout(this);
@@ -115,26 +114,22 @@ public class MainActivity extends Activity {
 
         TextView info = new TextView(this);
         info.setPadding(0, dp(8), 0, dp(8));
-        info.setText(prefs == null
-                ? "⚠ 本模块尚未在 LSPosed 中启用，设置不会生效。请在 LSPosed 管理器里启用 Task Filter，"
-                + "作用域勾选「小米服务框架」，然后重新打开本页面。"
-                : "勾选的应用会对「小米服务框架」隐藏：最近任务、前台应用变化、运行中的进程、使用记录和已安装应用列表。"
-                + "修改约 3 秒后生效。不要勾选依赖小米推送的应用（微信、QQ、钉钉、企业微信等）。\n"
-                + "用了应用双开时，双开空间里还有一个小米服务框架：先用 root 执行 "
-                + "pm install-existing --user 999 " + Prefs.MODULE + "，再在 LSPosed 的 999 用户页启用本模块并勾选小米服务框架。");
+        info.setText("勾选的应用会对「小米服务框架」隐藏：最近任务、前台应用变化、运行中的进程、使用记录和已安装应用列表。\n"
+                + "设置通过 root 写入小米服务框架的数据目录，请先在 KernelSU/Magisk 里给 Task Filter 授予 root；修改约 3 秒后生效。\n"
+                + "还需在 LSPosed 管理器里启用 Task Filter，作用域勾选「小米服务框架」。不要勾选依赖小米推送的应用（微信、QQ、钉钉、企业微信等）。\n"
+                + "用了应用双开时，在 999 用户页也要启用（root 执行 pm install-existing --user 999 " + Prefs.MODULE
+                + "）；但只需在主空间勾选一次，双开空间会自动写入。");
         root.addView(info);
 
         enabled = new CheckBox(this);
         enabled.setText("启用过滤");
-        enabled.setChecked(prefs == null || prefs.getBoolean(Prefs.KEY_ENABLED, true));
-        enabled.setEnabled(prefs != null);
+        enabled.setChecked(prefs.getBoolean(Prefs.KEY_ENABLED, true));
         enabled.setOnCheckedChangeListener((b, checked) -> save());
         root.addView(enabled);
 
         verbose = new CheckBox(this);
-        verbose.setText("记录日志（只记过滤次数；确认生效后可关闭，减少痕迹）");
-        verbose.setChecked(prefs == null || prefs.getBoolean(Prefs.KEY_VERBOSE, true));
-        verbose.setEnabled(prefs != null);
+        verbose.setText("记录日志（只记过滤次数，不记应用名；确认生效后建议关闭，减少痕迹）");
+        verbose.setChecked(prefs.getBoolean(Prefs.KEY_VERBOSE, true));
         verbose.setOnCheckedChangeListener((b, checked) -> save());
         root.addView(verbose);
 
@@ -165,20 +160,25 @@ public class MainActivity extends Activity {
         root.addView(source);
 
         summary = new TextView(this);
-        summary.setPadding(0, dp(4), 0, dp(4));
+        summary.setPadding(0, dp(4), 0, dp(2));
         root.addView(summary);
+
+        syncStatus = new TextView(this);
+        syncStatus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        syncStatus.setPadding(0, 0, 0, dp(4));
+        root.addView(syncStatus);
 
         list = new ListView(this);
         list.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
         adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_multiple_choice, shown);
         list.setAdapter(adapter);
-        list.setEnabled(prefs != null);
         list.setOnItemClickListener((AdapterView<?> parent, View view, int position, long id) -> onItemClick(position));
         root.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(root);
         requestAppListPermission();
         reload();
+        syncToTarget(); // ensure the target has the current selection (e.g. after reinstall or data clear)
     }
 
     @Override
@@ -326,7 +326,7 @@ public class MainActivity extends Activity {
                         sawMarker = true;
                     } else if (line.startsWith("package:")) {
                         String pkg = line.substring("package:".length()).trim();
-                        if (!PACKAGE.matcher(pkg).matches()) continue;
+                        if (!Prefs.isPackageName(pkg)) continue;
                         out.packages.add(pkg);
                         if (system) out.system.add(pkg);
                     }
@@ -370,7 +370,7 @@ public class MainActivity extends Activity {
             (isHidden ? checked : rest).add(a);
         }
         shown.clear();
-        if (!exact && PACKAGE.matcher(raw).matches()) shown.add(new App(raw, raw, false, true));
+        if (!exact && Prefs.isPackageName(raw)) shown.add(new App(raw, raw, false, true));
         shown.addAll(checked);
         shown.addAll(rest);
         adapter.notifyDataSetChanged();
@@ -382,18 +382,118 @@ public class MainActivity extends Activity {
     }
 
     private void save() {
-        if (prefs == null) return;
         prefs.edit()
                 .putStringSet(Prefs.KEY_HIDDEN, new HashSet<>(hidden))
                 .putBoolean(Prefs.KEY_ENABLED, enabled.isChecked())
                 .putBoolean(Prefs.KEY_VERBOSE, verbose.isChecked())
                 .apply();
         updateSummary();
+        syncToTarget();
     }
 
     private void updateSummary() {
         summary.setText(loading ? "正在读取应用列表…"
                 : "已选择 " + hidden.size() + " 个应用" + (enabled.isChecked() ? "" : "（过滤已关闭）"));
+    }
+
+    /** The plain-text config the hook reads: enabled/verbose flags then one package name per line. */
+    private String buildConfig() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("enabled=").append(enabled.isChecked() ? "1" : "0").append('\n');
+        sb.append("verbose=").append(verbose.isChecked() ? "1" : "0").append('\n');
+        List<String> pkgs = new ArrayList<>(hidden);
+        Collections.sort(pkgs);
+        for (String pkg : pkgs) {
+            if (Prefs.isPackageName(pkg)) sb.append(pkg).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private void syncToTarget() {
+        final String content = buildConfig();
+        syncStatus.setText("正在写入小米服务框架…");
+        new Thread(() -> {
+            final String result = writeConfigAsRoot(content);
+            runOnUiThread(() -> syncStatus.setText(result));
+        }, "tf-sync").start();
+    }
+
+    /**
+     * Writes the config into {@code /data/user_de/<u>/com.xiaomi.xmsf/files/.task-filter} for every
+     * user, matching the target's own owner and SELinux context so each Xiaomi Service Framework
+     * process can read it from its sandbox. Returns a short status for the screen.
+     */
+    private String writeConfigAsRoot(String content) {
+        Process p = null;
+        Thread watchdog = null;
+        try {
+            p = Runtime.getRuntime().exec("su");
+            final Process proc = p;
+            watchdog = new Thread(() -> {
+                try {
+                    Thread.sleep(15000);
+                    proc.destroy();
+                } catch (InterruptedException ignored) {
+                }
+            }, "tf-sync-watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
+
+            OutputStream os = p.getOutputStream();
+            os.write(buildScript(content).getBytes(StandardCharsets.UTF_8));
+            os.flush();
+            os.close();
+
+            int users = -1;
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    line = line.trim();
+                    if (line.startsWith("TF_DONE")) {
+                        String[] parts = line.split("\\s+");
+                        if (parts.length >= 2) {
+                            try {
+                                users = Integer.parseInt(parts[1]);
+                            } catch (NumberFormatException ignored) {
+                            }
+                        }
+                    }
+                }
+            }
+            boolean ok = p.waitFor(5, TimeUnit.SECONDS) && p.exitValue() == 0;
+            if (!ok) return "同步失败：root 命令未正常结束，请确认已给 Task Filter 授予 root。";
+            if (users < 0) return "同步失败：未能写入，请确认已授予 root 且小米服务框架已安装。";
+            if (users == 0) return "未找到小米服务框架的数据目录，未写入。";
+            return "已写入 " + users + " 个用户空间，约 3 秒后生效。确认生效后可关闭上面的「记录日志」。";
+        } catch (Throwable t) {
+            return "同步失败：无法获取 root（" + t.getClass().getSimpleName() + "），请在 KernelSU/Magisk 里给 Task Filter 授权。";
+        } finally {
+            if (watchdog != null) watchdog.interrupt();
+            if (p != null) p.destroy();
+        }
+    }
+
+    /** The root script, with the config embedded in a quoted here-doc (no shell expansion). */
+    private static String buildScript(String content) {
+        String cfg = Prefs.CONFIG_NAME;
+        return "cfg=$(cat <<'__TF_EOF__'\n"
+                + content
+                + "__TF_EOF__\n)\n"
+                + "n=0\n"
+                + "for d in /data/user_de/*/" + Prefs.TARGET + "; do\n"
+                + "  [ -d \"$d\" ] || continue\n"
+                + "  f=\"$d/files\"\n"
+                + "  mkdir -p \"$f\" 2>/dev/null || continue\n"
+                + "  printf '%s\\n' \"$cfg\" > \"$f/" + cfg + "\" 2>/dev/null || continue\n"
+                + "  owner=$(stat -c %u:%g \"$f\" 2>/dev/null)\n"
+                + "  [ -n \"$owner\" ] && chown \"$owner\" \"$f/" + cfg + "\" 2>/dev/null\n"
+                + "  ctx=$(ls -Zd \"$f\" 2>/dev/null | awk '{print $1}')\n"
+                + "  case \"$ctx\" in u:object_r:*) chcon \"$ctx\" \"$f/" + cfg + "\" 2>/dev/null;; esac\n"
+                + "  chmod 600 \"$f/" + cfg + "\" 2>/dev/null\n"
+                + "  n=$((n+1))\n"
+                + "done\n"
+                + "echo TF_DONE $n\n"
+                + "exit\n";
     }
 
     private int dp(int v) {
