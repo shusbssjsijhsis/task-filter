@@ -38,6 +38,8 @@ final class Config {
     private static volatile boolean present;
     private static volatile boolean autoNew = true;
     private static volatile boolean autoUnknown;
+    /** "!package" lines: apps the user turned down, never hidden automatically at install time. */
+    private static volatile Set<String> never = Collections.emptySet();
     private static volatile long lastCheck = Long.MIN_VALUE / 2;
 
     // Guarded by LOCK.
@@ -80,6 +82,12 @@ final class Config {
     static boolean autoUnknown() {
         hidden();
         return autoUnknown;
+    }
+
+    /** Apps the user turned down: never hidden automatically. */
+    static Set<String> neverAuto() {
+        hidden();
+        return never;
     }
 
     static int userId() {
@@ -138,6 +146,7 @@ final class Config {
             if (s == stamp) return;
             stamp = s;
             Set<String> sel = new HashSet<>();
+            Set<String> nev = new HashSet<>();
             boolean en = true;
             boolean log = true;
             boolean an = true;
@@ -152,7 +161,9 @@ final class Config {
                         else if (line.startsWith("verbose=")) log = !line.endsWith("=0");
                         else if (line.startsWith("autounknown=")) au = line.endsWith("=1");
                         else if (line.startsWith("auto=")) an = !line.endsWith("=0");
-                        else if (Prefs.isPackageName(line)) sel.add(line);
+                        else if (line.startsWith("!")) {
+                            if (Prefs.isPackageName(line.substring(1))) nev.add(line.substring(1));
+                        } else if (Prefs.isPackageName(line)) sel.add(line);
                     }
                 }
             }
@@ -172,6 +183,7 @@ final class Config {
             present = has;
             autoNew = an;
             autoUnknown = au;
+            never = Collections.unmodifiableSet(nev);
             selected = sel;
             auto = fromAuto;
             publish(flags, true);
